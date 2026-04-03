@@ -35,7 +35,7 @@ ADMIN_USERNAMES = [u.strip().lower().lstrip("@") for u in admin_usernames_raw.sp
 _admin_chat_ids: Dict[str, Optional[int]] = {u: None for u in ADMIN_USERNAMES}
 
 auth_users_raw = os.getenv("AUTHORIZED_USERNAMES", "")
-AUTHORIZED_USERNAMES = [u.strip().lower() for u in auth_users_raw.split(",") if u.strip()]
+AUTHORIZED_USERNAMES = [u.strip().lower().lstrip("@") for u in auth_users_raw.split(",") if u.strip()]
 
 CONTACT_USERNAME = os.getenv("CONTACT_USERNAME", "admin")
 LOG_CHANNEL_ID = os.getenv("LOG_CHANNEL_ID", "")
@@ -62,10 +62,14 @@ def get_session():
 
 # ================= LOGGING =================
 # Must be set up BEFORE Flask/pinger threads start so logger is ready
+import sys
 logging.basicConfig(
-    filename="bot.log",
     level=logging.INFO,
-    format="%(asctime)s - %(levelname)s - %(message)s"
+    format="%(asctime)s - %(levelname)s - %(message)s",
+    handlers=[
+        logging.FileHandler("bot.log"),
+        logging.StreamHandler(sys.stdout)
+    ]
 )
 logger = logging.getLogger(__name__)
 
