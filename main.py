@@ -762,111 +762,103 @@ def main():
     threading.Thread(target=run_flask, daemon=True).start()
     threading.Thread(target=pinger, daemon=True).start()
 
-    # Use a list so the async post_init closure can mutate it (nonlocal workaround)
-    _first_run = [True]
-
-    while True:
-        try:
-            # post_init runs inside the bot's event loop right after it starts —
-            # no job-queue package required, works with base python-telegram-bot.
-            async def post_init(application):
-                if ADMIN_USERNAMES and _first_run[0]:
-                    notified = 0
-                    for uname, cid in _admin_chat_ids.items():
-                        if cid:
-                            try:
-                                await application.bot.send_message(
-                                    chat_id=cid,
-                                    text="🚀 <b>Bot restarted:</b> Service is now online!",
-                                    parse_mode="HTML"
-                                )
-                                notified += 1
-                            except Exception as err:
-                                logger.error(f"Failed to notify @{uname}: {err}")
-                    if notified == 0:
-                        logger.info("No admin chat_ids cached yet — send /start to register.")
-                _first_run[0] = False
-
-                async def daily_summary_job(context: ContextTypes.DEFAULT_TYPE):
-                    date_str = datetime.now(IST).strftime('%Y-%m-%d')
-                    logs = get_recent_logs(200)
-                    from_today = [l for l in logs if l.get("timestamp", "").startswith(date_str)]
-                    
-                    if not from_today:
-                        # Write to last_sync anyway
-                        with open("last_sync.json", "w") as sf:
-                            json.dump({"last_sync": date_str}, sf)
-                        return
-                        
-                    json_bytes = json.dumps(from_today, indent=2).encode('utf-8')
-                    f = io.BytesIO(json_bytes)
-                    f.name = f"daily_summary_{date_str}.json"
-                    
-                    text = f"📊 <b>Daily Activity Digest - {date_str}</b>\n\nThere were {len(from_today)} backup actions recorded today. Master backup JSON attached."
-                    
-                    for uname, cid in _admin_chat_ids.items():
-                        if cid:
-                            try:
-                                f.seek(0)
-                                await context.bot.send_document(chat_id=cid, document=f, caption=text, parse_mode="HTML")
-                            except Exception as e:
-                                logger.error(f"Failed to send daily digest to {uname}: {e}")
-                    
+    # Use a clean async initialization for the bot application
+    # and avoiding a while-true loop around run_polling which caused the coroutine warnings.
+    async def post_init(application):
+        if ADMIN_USERNAMES:
+            notified = 0
+            for uname, cid in _admin_chat_ids.items():
+                if cid:
                     try:
-                        with open("last_sync.json", "w") as sf:
-                            json.dump({"last_sync": date_str}, sf)
+                        await application.bot.send_message(
+                            chat_id=cid,
+                            text="🚀 <b>Bot restarted:</b> Service is now online!",
+                            parse_mode="HTML"
+                        )
+                        notified += 1
+                    except Exception as err:
+                        logger.error(f"Failed to notify @{uname}: {err}")
+            if notified == 0:
+                logger.info("No admin chat_ids cached yet — send /start to register.")
+
+        async def daily_summary_job(context: ContextTypes.DEFAULT_TYPE):
+            date_str = datetime.now(IST).strftime('%Y-%m-%d')
+            logs = get_recent_logs(200)
+            from_today = [l for l in logs if l.get("timestamp", "").startswith(date_str)]
+            
+            if not from_today:
+                with open("last_sync.json", "w") as sf:
+                    json.dump({"last_sync": date_str}, sf)
+                return
+                
+            json_bytes = json.dumps(from_today, indent=2).encode('utf-8')
+            f = io.BytesIO(json_bytes)
+            f.name = f"daily_summary_{date_str}.json"
+            
+            text = f"📊 <b>Daily Activity Digest - {date_str}</b>\n\nThere were {len(from_today)} backup actions recorded today. Master backup JSON attached."
+            
+            for uname, cid in _admin_chat_ids.items():
+                if cid:
+                    try:
+                        f.seek(0)
+                        await context.bot.send_document(chat_id=cid, document=f, caption=text, parse_mode="HTML")
                     except Exception as e:
-                        logger.error(f"Error saving last_sync: {e}")
+                        logger.error(f"Failed to send daily digest to {uname}: {e}")
+            
+            try:
+                with open("last_sync.json", "w") as sf:
+                    json.dump({"last_sync": date_str}, sf)
+            except Exception as e:
+                logger.error(f"Error saving last_sync: {e}")
 
-                import datetime as dt
-                target_time = dt.time(hour=23, minute=0, tzinfo=IST)
-                if application.job_queue:
-                    application.job_queue.run_daily(daily_summary_job, time=target_time)
-                
-                date_str = datetime.now(IST).strftime('%Y-%m-%d')
-                try:
-                    if os.path.exists("last_sync.json"):
-                        with open("last_sync.json", "r") as sf:
-                            last_sync = json.load(sf).get("last_sync", "")
-                    else:
-                        last_sync = ""
-                except: last_sync = ""
-                
-                if datetime.now(IST).hour >= 23 and last_sync != date_str:
-                    if application.job_queue:
-                        application.job_queue.run_once(daily_summary_job, 10)
-
-            app = (
-                ApplicationBuilder()
-                .token(TELEGRAM_BOT_TOKEN)
-                .post_init(post_init)
-                .build()
-            )
-            app.add_handler(CommandHandler("start", start_cmd))
-            app.add_handler(CommandHandler("help", help_cmd))
-            app.add_handler(CommandHandler("list", list_cmd))
-            app.add_handler(CommandHandler("delete", delete_cmd))
-            app.add_handler(CommandHandler("reset", reset_cmd))
-            app.add_handler(CommandHandler("log", log_cmd))
-            app.add_handler(CommandHandler("export", export_cmd))
-            app.add_handler(CommandHandler("verifychannel", verifychannel_cmd))
-            app.add_handler(CallbackQueryHandler(log_callback, pattern="^log_page_"))
-            app.add_handler(MessageHandler(filters.ALL & (~filters.COMMAND), handle_all))
-
-            print(f"🚀 Bot V5.1 is running for {len(AUTHORIZED_USERNAMES)} authorized usernames...")
-
-            # drop_pending_updates=True clears old queued messages from a crashed/
-            # redeployed instance — also fixes Telegram 'Conflict' errors on Render.
-            app.run_polling(drop_pending_updates=True)
-
-        except Exception as e:
-            err_str = str(e)
-            if "Conflict" in err_str:
-                logger.warning("⚠️  Telegram Conflict: another instance is still running. Waiting 30s...")
-                time.sleep(30)
+        import datetime as dt
+        target_time = dt.time(hour=23, minute=0, tzinfo=IST)
+        if application.job_queue:
+            application.job_queue.run_daily(daily_summary_job, time=target_time)
+        
+        date_str = datetime.now(IST).strftime('%Y-%m-%d')
+        try:
+            if os.path.exists("last_sync.json"):
+                with open("last_sync.json", "r") as sf:
+                    last_sync = json.load(sf).get("last_sync", "")
             else:
-                logger.error(f"⚠️  GLOBAL CRASH: {err_str}. Restarting in 10 seconds...")
-                time.sleep(10)
+                last_sync = ""
+        except: last_sync = ""
+        
+        if datetime.now(IST).hour >= 23 and last_sync != date_str:
+            if application.job_queue:
+                application.job_queue.run_once(daily_summary_job, 10)
+
+    app = (
+        ApplicationBuilder()
+        .token(TELEGRAM_BOT_TOKEN)
+        .post_init(post_init)
+        .build()
+    )
+    app.add_handler(CommandHandler("start", start_cmd))
+    app.add_handler(CommandHandler("help", help_cmd))
+    app.add_handler(CommandHandler("list", list_cmd))
+    app.add_handler(CommandHandler("delete", delete_cmd))
+    app.add_handler(CommandHandler("reset", reset_cmd))
+    app.add_handler(CommandHandler("log", log_cmd))
+    app.add_handler(CommandHandler("export", export_cmd))
+    app.add_handler(CommandHandler("verifychannel", verifychannel_cmd))
+    app.add_handler(CallbackQueryHandler(log_callback, pattern="^log_page_"))
+    app.add_handler(MessageHandler(filters.ALL & (~filters.COMMAND), handle_all))
+
+    print(f"🚀 Bot V5.1 is running for {len(AUTHORIZED_USERNAMES)} authorized usernames...")
+
+    try:
+        # drop_pending_updates=True clears old queued messages from a crashed/
+        # redeployed instance — also fixes Telegram 'Conflict' errors on Render.
+        app.run_polling(drop_pending_updates=True)
+    except Exception as e:
+        err_str = str(e)
+        if "Conflict" in err_str:
+            logger.warning("⚠️  Telegram Conflict: another instance is still running. Exiting to allow Render restart...")
+        else:
+            logger.error(f"⚠️  GLOBAL CRASH: {err_str}. Exiting...")
+        raise e
 
 if __name__ == "__main__":
     main()
