@@ -115,6 +115,25 @@ async def send_success_and_json(context, message_or_update, text, action, userna
         except Exception as e:
             logger.error(f"Failed to silently send log: {e}")
 
+async def backup_snapshot_to_channel(context):
+    if not LOG_CHANNEL_ID: return
+    try:
+        url = f"{WP_URL}/wp-json/wp/v2/notice?per_page=100&status=publish,future,draft"
+        r = get_session().get(url)
+        if r.status_code == 200:
+            notices = r.json()
+            json_bytes = json.dumps(notices, indent=2).encode('utf-8')
+            f = io.BytesIO(json_bytes)
+            f.name = f"notices_backup_snapshot_{datetime.now(IST).strftime('%Y-%m-%d')}.json"
+            await context.bot.send_document(
+                chat_id=LOG_CHANNEL_ID, 
+                document=f, 
+                caption=f"📦 <b>Auto-Snapshot Backup</b>\nUpdated snapshot containing {len(notices)} remaining notices.",
+                parse_mode="HTML"
+            )
+    except Exception as e:
+         logger.error(f"Failed snapshot: {e}")
+
 # ================= RENDER KEEP-ALIVE =================
 app_flask = Flask(__name__)
 
@@ -300,18 +319,44 @@ async def delete_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
         await update.message.reply_text("❓ Please provide an ID. Usage: <code>/delete 123</code>", parse_mode="HTML")
         return
+        
     post_id = context.args[0]
-    url = f"{WP_URL}/wp-json/wp/v2/notice/{post_id}?force=true"
-    r = get_session().delete(url)
+    
+    url = f"{WP_URL}/wp-json/wp/v2/notice/{post_id}"
+    r_get = get_session().get(url)
+    notice_title = "Unknown"
+    notice_content = "Unknown"
+    
+    if r_get.status_code == 200:
+        notice_data = r_get.json()
+        raw_title = notice_data.get("title", {}).get("rendered", "Unknown")
+        notice_title = re.sub(r'<[^>]*>', '', raw_title).strip()
+        raw_content = notice_data.get("content", {}).get("rendered", "Unknown")
+        notice_content = re.sub(r'<[^>]*>', '', raw_content).strip()
+        if len(notice_content) > 200:
+            notice_content = notice_content[:197] + "..."
+            
+    del_url = f"{WP_URL}/wp-json/wp/v2/notice/{post_id}?force=true"
+    r = get_session().delete(del_url)
+    
     if r.status_code == 200:
-        await send_success_and_json(
-            context,
-            update, 
-            f"🗑 Notice <code>{post_id}</code> deleted successfully.", 
-            "Delete Notice", 
-            update.effective_user.username, 
-            {"post_id": post_id, "response": r.json()}
-        )
+        await update.message.reply_text(f"🗑 Notice <code>{post_id}</code> deleted successfully.", parse_mode="HTML")
+        username = update.effective_user.username
+        log_activity("Delete Notice", username, {"post_id": post_id})
+        
+        if LOG_CHANNEL_ID:
+            alert_text = (
+                f"🚨 <b>DELETE NOTIFICATION</b>\n"
+                f"<b>User:</b> @{username}\n"
+                f"<b>Action:</b> Deleted Notice (ID: {post_id})\n\n"
+                f"<b>Title:</b> {html.escape(notice_title)}\n"
+                f"<b>Content:</b>\n<pre>{html.escape(notice_content)}</pre>"
+            )
+            try:
+                await context.bot.send_message(chat_id=LOG_CHANNEL_ID, text=alert_text, parse_mode="HTML")
+            except Exception as e:
+                logger.error(f"Failed to send delete alert to log channel: {e}")
+            await backup_snapshot_to_channel(context)
     else:
         await update.message.reply_text(f"❌ Deletion failed. Check if ID <code>{post_id}</code> is correct.", parse_mode="HTML")
 
@@ -338,15 +383,23 @@ async def reset_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             dr = get_session().delete(del_url)
             if dr.status_code == 200:
                 count += 1
+                
+        username = update.effective_user.username
+        await update.message.reply_text(f"🗑 <b>Successfully deleted {count} notices!</b>\nNotice board is now clean.", parse_mode="HTML")
+        log_activity("Reset All Notices", username, {"deleted_count": count})
         
-        await send_success_and_json(
-            context,
-            update,
-            f"🗑 <b>Successfully deleted {count} notices!</b>\nNotice board is now clean.",
-            "Reset All Notices",
-            update.effective_user.username,
-            {"deleted_count": count, "notices_deleted": [n['id'] for n in notices]}
-        )
+        if LOG_CHANNEL_ID:
+            alert_text = (
+                f"🚨 <b>MASS DELETE NOTIFICATION (RESET)</b>\n"
+                f"<b>User:</b> @{username}\n"
+                f"<b>Action:</b> Wiped all notices!\n\n"
+                f"<b>Total Deleted:</b> {count} notices."
+            )
+            try:
+                await context.bot.send_message(chat_id=LOG_CHANNEL_ID, text=alert_text, parse_mode="HTML")
+            except Exception as e:
+                pass
+            await backup_snapshot_to_channel(context)
     else:
         await update.message.reply_text("❌ <b>Failed to connect to WordPress for reset.</b>", parse_mode="HTML")
 
