@@ -33,6 +33,7 @@ dist/
 # ===========================
 *.log
 bot.log
+activity_log.json
 
 # ===========================
 # OS / EDITOR JUNK

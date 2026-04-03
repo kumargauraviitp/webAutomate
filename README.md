@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="https://capsule-render.vercel.app/api?type=waving&color=0:0f0c29,50:302b63,100:24243e&height=200&section=header&text=RPS%20Admin%20Bot&fontSize=60&fontColor=ffffff&fontAlignY=38&desc=Telegram%20%E2%86%94%20WordPress%20Command%20Center&descAlignY=60&descSize=18&animation=fadeIn" width="100%"/>
+<img src="https://capsule-render.vercel.app/api?type=waving&color=0:0f0c29,50:302b63,100:24243e&height=200&section=header&text=WordPress%20Admin%20Bot&fontSize=60&fontColor=ffffff&fontAlignY=38&desc=Telegram%20%E2%86%94%20WordPress%20Command%20Center&descAlignY=60&descSize=18&animation=fadeIn" width="100%"/>
 
 <br/>
 
@@ -25,9 +25,9 @@
 
 </div>
 
-**RPS Admin Bot** is a production-grade Telegram bot that acts as a **remote control for your WordPress school website**. Send a message from your phone → it appears as a notice on the site in seconds. No logins, no dashboards — just Telegram.
+**Wordpress Admin Bot** is a production-grade Telegram bot that acts as a **remote control for your WordPress school website**. Send a message from your phone → it appears as a notice on the site in seconds. No logins, no dashboards — just Telegram.
 
-Built for **[RPS Kochas](https://rpskochas.in)** school, but works with any WordPress site that uses a custom post type.
+Built for **[WordPress Automation]** school, but works with any WordPress site that uses a custom post type.
 
 ---
 
@@ -61,11 +61,14 @@ Built for **[RPS Kochas](https://rpskochas.in)** school, but works with any Word
 <tr>
 <td width="50%">
 
-### 🛠 Operations
-- `/list` — See last 5 notices with IDs
+### 🛠 Operations & Data
+- `/list` — See last 5 notices
+- `/log` — Paginated history of all admin actions
+- `/export` — Download all notices as a JSON backup
+- `/verifychannel` — Test a Private Channel for Database storage
+- **IMPORT** — Send JSON file with caption `IMPORT` to restore notices
 - `/delete [ID]` — Remove a single notice
 - `/reset` — Wipe the entire notice board
-- Inline keyboard shortcuts for all commands
 
 </td>
 <td width="50%">
@@ -196,10 +199,25 @@ TELEGRAM_BOT_TOKEN=your_bot_token_here
 
 # Access control (no '@', comma-separated for multiple)
 AUTHORIZED_USERNAMES=alice,bob
+CONTACT_USERNAME=alice
+
+# Security & Data Storage
+# ID of a private Telegram Channel where the bot is Admin (-100xxxxxx) to store logs silently.
+LOG_CHANNEL_ID=-1000000000000
 
 # Admins who get startup notifications (subset of above is fine)
 ADMIN_USERNAME=alice,bob
 ```
+
+---
+
+### Step 5.5 — Create the Telegram Database (Optional but Recommended)
+Render's Free Tier will erase local log files every day. To keep permanent records of bot activity without spamming your personal chat:
+1. Create a **Private Telegram Channel** (e.g., "Bot Logs").
+2. Add your bot directly as an Administrator.
+3. Add your authorized admins to the channel.
+4. Send exactly `/verifychannel` into the channel.
+5. The bot will print a `-100x` ID. Paste this into `LOG_CHANNEL_ID` in `.env_`. Now all logs backup safely!
 
 ---
 
@@ -265,6 +283,9 @@ Go to your service → **Environment** tab → add these:
 | `TELEGRAM_BOT_TOKEN` | your bot token |
 | `AUTHORIZED_USERNAMES` | `alice,bob` |
 | `ADMIN_USERNAME` | `alice,bob` |
+| `CONTACT_USERNAME` | `alice` |
+| `LOG_CHANNEL_ID` | `-100xxx...` |
+| `DATABASE_ADMIN_USERNAMES` | `alice` |
 
 > ✅ **Do NOT add `RENDER_EXTERNAL_URL`** — Render injects this automatically.
 
@@ -294,6 +315,9 @@ The bot will now **never sleep** — the self-pinger hits the health endpoint ev
 | `TELEGRAM_BOT_TOKEN` | ✅ | Bot token from @BotFather | `123456:ABCdef` |
 | `AUTHORIZED_USERNAMES` | ✅ | Who can use the bot | `alice,bob` |
 | `ADMIN_USERNAME` | ⚡ | Who gets startup notifications | `alice` |
+| `CONTACT_USERNAME`| ⚡ | Shown when unauthorized users try access | `alice` |
+| `LOG_CHANNEL_ID` | ⚡ | Channel ID for Database activity tracking| `-100xxx...` |
+| `DATABASE_ADMIN_USERNAMES`| ⚡ | Required Admins for DB verification | `alice` |
 | `PORT` | auto | Flask server port (Render sets this) | `8080` |
 | `RENDER_EXTERNAL_URL` | auto | Your Render service URL (auto-injected) | auto |
 

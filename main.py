@@ -8,13 +8,15 @@ import html
 import threading
 import time
 import socket
+import json
+import io
 from typing import Dict, Optional
 from flask import Flask
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 from dotenv import load_dotenv
 
-from telegram import Update, ReplyKeyboardMarkup, KeyboardButton
-from telegram.ext import ApplicationBuilder, MessageHandler, CommandHandler, ContextTypes, filters
+from telegram import Update, ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
+from telegram.ext import ApplicationBuilder, MessageHandler, CommandHandler, ContextTypes, filters, CallbackQueryHandler
 from requests.adapters import HTTPAdapter
 from urllib3.util import Retry
 
@@ -36,6 +38,13 @@ auth_users_raw = os.getenv("AUTHORIZED_USERNAMES", "")
 AUTHORIZED_USERNAMES = [u.strip().lower() for u in auth_users_raw.split(",") if u.strip()]
 
 CONTACT_USERNAME = os.getenv("CONTACT_USERNAME", "admin")
+LOG_CHANNEL_ID = os.getenv("LOG_CHANNEL_ID", "")
+
+db_admins_raw = os.getenv("DATABASE_ADMIN_USERNAMES", "")
+DATABASE_ADMIN_USERNAMES = [u.strip().lower().lstrip("@") for u in db_admins_raw.split(",") if u.strip()]
+
+# Indian Standard Time (IST)
+IST = timezone(timedelta(hours=5, minutes=30))
 
 # ================= SESSION WITH RETRIES =================
 def get_session():
@@ -59,6 +68,52 @@ logging.basicConfig(
     format="%(asctime)s - %(levelname)s - %(message)s"
 )
 logger = logging.getLogger(__name__)
+
+# ================= ACTIVITY LOG =================
+def log_activity(action, username, details):
+    entry = {
+        "timestamp": datetime.now(IST).isoformat(),
+        "action": action,
+        "user": username,
+        "details": details
+    }
+    try:
+        logs = []
+        if os.path.exists("activity_log.json"):
+            with open("activity_log.json", "r", encoding="utf-8") as f:
+                logs = json.load(f)
+        logs.append(entry)
+        with open("activity_log.json", "w", encoding="utf-8") as f:
+            json.dump(logs, f, indent=2)
+    except Exception as e:
+        logger.error(f"Failed to write log: {e}")
+
+def get_recent_logs(n=50):
+    try:
+        if os.path.exists("activity_log.json"):
+            with open("activity_log.json", "r", encoding="utf-8") as f:
+                logs = json.load(f)
+                return logs[-n:]
+    except Exception as e:
+        logger.error(f"Failed to read logs: {e}")
+    return []
+
+async def send_success_and_json(context, message_or_update, text, action, username, details):
+    if hasattr(message_or_update, 'reply_text'):
+        msg = message_or_update
+    else:
+        msg = message_or_update.message
+    await msg.reply_text(text, parse_mode="HTML")
+    log_activity(action, username, details)
+    json_bytes = json.dumps({"action": action, "user": username, "timestamp": datetime.now(IST).isoformat(), "details": details}, indent=2).encode('utf-8')
+    f = io.BytesIO(json_bytes)
+    f.name = f"{action.lower().replace(' ', '_')}_{int(time.time())}.json"
+    
+    if LOG_CHANNEL_ID:
+        try:
+            await context.bot.send_document(chat_id=LOG_CHANNEL_ID, document=f, caption=f"Silently storing log for {action}")
+        except Exception as e:
+            logger.error(f"Failed to silently send log: {e}")
 
 # ================= RENDER KEEP-ALIVE =================
 app_flask = Flask(__name__)
@@ -115,6 +170,7 @@ def get_auth():
 def get_main_menu():
     keyboard = [
         [KeyboardButton("📝 List Notices"), KeyboardButton("🚩 Update Banner")],
+        [KeyboardButton("📊 Activity Log"), KeyboardButton("📦 Export Data")],
         [KeyboardButton("🗑 Reset All Notices"), KeyboardButton("❓ Help Guide")]
     ]
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True, is_persistent=True)
@@ -207,9 +263,13 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• <b>PDF + Caption</b>: Notice with a document.\n\n"
         "🔧 <b>Available Commands:</b>\n"
         "• <code>/list</code>: See last 5 notices.\n"
-        "• <code>/reset</code>: Delete ALL notices at once.\n"
         "• <code>/delete [ID]</code>: Remove one notice.\n"
-        "• <code>BANNER: [text]</code>: Update marquee.\n\n"
+        "• <code>/reset</code>: Delete ALL notices at once.\n"
+        "• <code>BANNER: [text]</code>: Update marquee.\n"
+        "• <code>/log</code>: Show recent bot activity.\n"
+        "• <code>/log full</code>: Get all activity logs as .txt file.\n"
+        "• <code>/export</code>: Export all notices as .json file.\n"
+        "• <b>IMPORT</b>: Send a .json file with caption IMPORT to restore notices.\n\n"
         "<i>All buttons below are shortcuts for these commands!</i>"
     )
     await update.message.reply_text(help_text, parse_mode="HTML", reply_markup=get_main_menu())
@@ -244,7 +304,14 @@ async def delete_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     url = f"{WP_URL}/wp-json/wp/v2/notice/{post_id}?force=true"
     r = get_session().delete(url)
     if r.status_code == 200:
-        await update.message.reply_text(f"🗑 Notice <code>{post_id}</code> deleted successfully.", parse_mode="HTML")
+        await send_success_and_json(
+            context,
+            update, 
+            f"🗑 Notice <code>{post_id}</code> deleted successfully.", 
+            "Delete Notice", 
+            update.effective_user.username, 
+            {"post_id": post_id, "response": r.json()}
+        )
     else:
         await update.message.reply_text(f"❌ Deletion failed. Check if ID <code>{post_id}</code> is correct.", parse_mode="HTML")
 
@@ -272,9 +339,160 @@ async def reset_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if dr.status_code == 200:
                 count += 1
         
-        await update.message.reply_text(f"🗑 <b>Successfully deleted {count} notices!</b>\nNotice board is now clean.", parse_mode="HTML")
+        await send_success_and_json(
+            context,
+            update,
+            f"🗑 <b>Successfully deleted {count} notices!</b>\nNotice board is now clean.",
+            "Reset All Notices",
+            update.effective_user.username,
+            {"deleted_count": count, "notices_deleted": [n['id'] for n in notices]}
+        )
     else:
         await update.message.reply_text("❌ <b>Failed to connect to WordPress for reset.</b>", parse_mode="HTML")
+
+async def send_log_page(target, page: int):
+    logs = get_recent_logs(50)
+    if not logs:
+        if hasattr(target, 'edit_text'):
+            await target.edit_text("📭 No recent activity found.")
+        else:
+            await target.reply_text("📭 No recent activity found.")
+        return
+        
+    # Reverse so newest are at the top
+    logs.reverse()
+    
+    total_pages = (len(logs) - 1) // 10 + 1
+    if page < 1: page = 1
+    if page > total_pages: page = total_pages
+    
+    start_idx = (page - 1) * 10
+    end_idx = start_idx + 10
+    page_logs = logs[start_idx:end_idx]
+    
+    text = f"📊 <b>Recent Activity (Page {page}/{total_pages})</b>\n\n"
+    for log in page_logs:
+        action = html.escape(log.get('action', 'Unknown Action'))
+        user = html.escape(log.get('user', 'unknown'))
+        ts = log.get('timestamp', '')[:19].replace('T', ' ')
+        
+        icon = "🔹"
+        if "Delete" in action or "Reset" in action: icon = "🗑"
+        elif "Create" in action: icon = "✅"
+        elif "Banner" in action: icon = "🚩"
+        
+        text += f"{icon} <b>{action}</b> by @{user}\n"
+        text += f"   <i>{ts}</i>\n"
+
+    buttons = []
+    if page > 1:
+        buttons.append(InlineKeyboardButton("⬅️ Prev", callback_data=f"log_page_{page-1}"))
+    if page < total_pages:
+        buttons.append(InlineKeyboardButton("Next ➡️", callback_data=f"log_page_{page+1}"))
+        
+    reply_markup = InlineKeyboardMarkup([buttons]) if buttons else None
+    
+    if hasattr(target, 'edit_text'):
+        await target.edit_text(text, parse_mode="HTML", reply_markup=reply_markup)
+    else:
+        await target.reply_text(text, parse_mode="HTML", reply_markup=reply_markup)
+
+async def log_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if not is_auth(query.from_user.username):
+        await query.answer("🛑 Access Denied!", show_alert=True)
+        return
+        
+    await query.answer()
+    if query.data.startswith("log_page_"):
+        page = int(query.data.split("_")[2])
+        await send_log_page(query.message, page)
+
+async def log_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_auth(update.effective_user.username):
+        await update.message.reply_text(f"🛑 Access Denied! Contact @{html.escape(CONTACT_USERNAME)} for access.")
+        return
+    
+    parts = update.message.text.split()
+    if len(parts) > 1 and parts[1].lower() == "full" or update.message.text.lower() == "log full":
+        if not os.path.exists("activity_log.json"):
+            await update.message.reply_text("📭 No activity logs found.")
+            return
+        
+        with open("activity_log.json", "r", encoding="utf-8") as f:
+            logs = json.load(f)
+        
+        txt_content = "📊 RPS Admin Bot - Full Activity Log\n=====================================\n\n"
+        for log in logs:
+            txt_content += f"[{log.get('timestamp', '')}] {log.get('action')} by @{log.get('user')}\n"
+            txt_content += f"Details: {json.dumps(log.get('details', {}))}\n"
+            txt_content += "-"*40 + "\n"
+        
+        f_bytes = io.BytesIO(txt_content.encode('utf-8'))
+        f_bytes.name = f"activity_log_full_{int(time.time())}.txt"
+        await update.message.reply_document(document=f_bytes, caption="📊 Full Activity Log")
+        return
+
+    # Send first page
+    await send_log_page(update.message, 1)
+
+async def verifychannel_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat = update.effective_chat
+    if chat.type not in ['channel', 'group', 'supergroup']:
+        await context.bot.send_message(chat_id=chat.id, text="❌ This command must be used inside a Channel or Group.")
+        return
+        
+    try:
+        admins = await context.bot.get_chat_administrators(chat_id=chat.id)
+        admin_usernames_in_chat = [a.user.username.lower() for a in admins if a.user.username]
+        
+        missing_admins = []
+        for required_admin in DATABASE_ADMIN_USERNAMES:
+            if required_admin.lower() not in admin_usernames_in_chat:
+                missing_admins.append(required_admin)
+                
+        if missing_admins:
+            await context.bot.send_message(
+                chat_id=chat.id, 
+                text=f"⚠️ <b>WARNING: Cannot use this channel as a Database!</b>\n\nThe following required admins are NOT administrators in this channel:\n{', '.join(missing_admins)}\n\nPlease make them admins first.", 
+                parse_mode="HTML"
+            )
+            return
+            
+        await context.bot.send_message(
+            chat_id=chat.id,
+            text=f"✅ <b>CHANNEL VERIFIED!</b>\n\nThis channel is safe to use as your Database.\nCopy this ID and put it in your `.env` file under `LOG_CHANNEL_ID`:\n\n<code>{chat.id}</code>",
+            parse_mode="HTML"
+        )
+    except Exception as e:
+        await context.bot.send_message(chat_id=chat.id, text=f"❌ Error verifying channel: Ensure the bot is an admin first! ({html.escape(str(e))})")
+
+async def export_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_auth(update.effective_user.username):
+        await update.message.reply_text(f"🛑 Access Denied! Contact @{html.escape(CONTACT_USERNAME)} for access.")
+        return
+    
+    await update.message.reply_text("⏳ <b>Fetching all notices for export...</b>", parse_mode="HTML")
+    url = f"{WP_URL}/wp-json/wp/v2/notice?per_page=100&status=publish,future,draft"
+    r = get_session().get(url)
+    
+    if r.status_code == 200:
+        notices = r.json()
+        if not notices:
+            await update.message.reply_text("📭 No notices found to export.")
+            return
+        
+        json_bytes = json.dumps(notices, indent=2).encode('utf-8')
+        f = io.BytesIO(json_bytes)
+        f.name = f"notices_export_{datetime.now().strftime('%Y-%m-%d')}.json"
+        
+        await update.message.reply_document(
+            document=f, 
+            caption=f"📦 <b>Export Complete!</b>\n{len(notices)} notices exported.\n\n<i>To restore: send this file back with caption 'IMPORT'</i>", 
+            parse_mode="HTML"
+        )
+    else:
+        await update.message.reply_text("❌ Failed to fetch notices for export.")
 
 # ================= MAIN HANDLERS =================
 
@@ -292,6 +510,10 @@ async def handle_all(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return await reset_cmd(update, context)
     if msg.text == "❓ Help Guide":
         return await help_cmd(update, context)
+    if msg.text == "📊 Activity Log":
+        return await log_cmd(update, context)
+    if msg.text == "📦 Export Data":
+        return await export_cmd(update, context)
     if msg.text == "🚩 Update Banner":
         return await update.message.reply_text("🚩 <b>To update the banner:</b>\nSend a message starting with <code>BANNER:</code> followed by your text.\n\nExample:\n<code>BANNER: Welcome to RPS Kochas!</code>", parse_mode="HTML")
 
@@ -310,7 +532,14 @@ async def handle_all(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         f"🔗 <b>Website:</b> {html.escape(WP_URL)}\n\n"
                         "<i>The styled banner is now live on the scroll bar.</i>"
                     )
-                    await msg.reply_text(success_msg, parse_mode="HTML")
+                    await send_success_and_json(
+                        context,
+                        update,
+                        success_msg,
+                        "Update Banner",
+                        update.effective_user.username,
+                        {"banner_text": banner_text, "clean_preview": clean_preview}
+                    )
                 else:
                     await msg.reply_text("❌ <b>Failed to update Marquee setting.</b>")
                 return
@@ -326,7 +555,7 @@ async def handle_all(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 title = re.sub(r'<[^>]*>', '', first_line).strip()[:50]
 
             if not title: title = "School Update"
-            create_post(title, body_content)
+            resp = create_post(title, body_content)
             safe_title = html.escape(title)
             success_msg = (
                 "✅ <b>POSTED TO WEBSITE!</b>\n\n"
@@ -334,7 +563,14 @@ async def handle_all(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"🔗 <b>Visit:</b> {html.escape(WP_URL)}\n\n"
                 "<i>Your update is now visible in the notice board.</i>"
             )
-            await msg.reply_text(success_msg, parse_mode="HTML")
+            await send_success_and_json(
+                context,
+                update,
+                success_msg,
+                "Create Notice (Text)",
+                update.effective_user.username,
+                {"title": title, "content": body_content, "response": resp}
+            )
             return
 
         # PHOTO
@@ -353,16 +589,57 @@ async def handle_all(update: Update, context: ContextTypes.DEFAULT_TYPE):
             file = await context.bot.get_file(msg.photo[-1].file_id)
             file_bytes = await file.download_as_bytearray()
             media_id, _ = upload_media(file_bytes, filename="update_image.jpg")
-            create_post(title, body_content, media_id=media_id)
+            resp = create_post(title, body_content, media_id=media_id)
             
             safe_title = html.escape(title)
-            await msg.reply_text(f"🖼 <b>Posted with Image!</b>\nTitle: {safe_title}\n🔗 {html.escape(WP_URL)}", parse_mode="HTML")
+            await send_success_and_json(
+                context,
+                update,
+                f"🖼 <b>Posted with Image!</b>\nTitle: {safe_title}\n🔗 {html.escape(WP_URL)}",
+                "Create Notice (Photo)",
+                update.effective_user.username,
+                {"title": title, "content": body_content, "media_id": media_id, "response": resp}
+            )
             return
 
-        # DOCUMENT (PDF)
+        # DOCUMENT (PDF or JSON import)
         if msg.document:
             filename = msg.document.file_name
             caption = msg.caption or f"Notice: {filename}"
+            
+            if caption.strip().upper().startswith("IMPORT") and filename.endswith(".json"):
+                await msg.reply_text(f"⏳ Processing IMPORT from <b>{html.escape(filename)}</b>...", parse_mode="HTML")
+                file = await context.bot.get_file(msg.document.file_id)
+                file_bytes = await file.download_as_bytearray()
+                try:
+                    import_data = json.loads(file_bytes.decode('utf-8'))
+                    if not isinstance(import_data, list):
+                        await msg.reply_text("❌ Invalid JSON format (expected a list of notices).")
+                        return
+                    
+                    count = 0
+                    for n in import_data:
+                        title = n.get('title', {}).get('rendered', 'Imported Notice')
+                        content = n.get('content', {}).get('raw', n.get('content', {}).get('rendered', ''))
+                        if not content:
+                            content = "Imported content missing."
+                        
+                        title = re.sub(r'<[^>]*>', '', title).strip()[:50]
+                        create_post(title, content)
+                        count += 1
+                        
+                    await send_success_and_json(
+                        context,
+                        update,
+                        f"✅ <b>IMPORT COMPLETE</b>\nSuccessfully created {count} notices.",
+                        "Import Data",
+                        update.effective_user.username,
+                        {"imported_count": count, "filename": filename}
+                    )
+                except Exception as e:
+                    await msg.reply_text(f"❌ Failed to parse JSON or import: {html.escape(str(e))}", parse_mode="HTML")
+                return
+
             h_match = re.search(r'<(h[1-3])[^>]*>(.*?)</\1>', caption, re.IGNORECASE | re.DOTALL)
             if h_match:
                 title = re.sub(r'<[^>]*>', '', h_match.group(2)).strip()[:50]
@@ -382,10 +659,17 @@ async def handle_all(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
             doc_link = f'\n\n<div class="notice-attachment"><a href="{doc_url}" class="notice-doc-btn" target="_blank">📄 View Document: {filename}</a></div>'
             body_with_doc = body_base + doc_link
-            create_post(title, body_with_doc)
+            resp = create_post(title, body_with_doc)
             
             safe_title = html.escape(title)
-            await msg.reply_text(f"📄 <b>Notice Posted with Document!</b>\nFile: {safe_filename}\n🔗 {html.escape(WP_URL)}", parse_mode="HTML")
+            await send_success_and_json(
+                context,
+                update,
+                f"📄 <b>Notice Posted with Document!</b>\nFile: {safe_filename}\n🔗 {html.escape(WP_URL)}",
+                "Create Notice (Document)",
+                update.effective_user.username,
+                {"title": title, "content": body_with_doc, "filename": filename, "response": resp}
+            )
             return
 
     except Exception as e:
@@ -430,6 +714,55 @@ def main():
                         logger.info("No admin chat_ids cached yet — send /start to register.")
                 _first_run[0] = False
 
+                async def daily_summary_job(context: ContextTypes.DEFAULT_TYPE):
+                    date_str = datetime.now(IST).strftime('%Y-%m-%d')
+                    logs = get_recent_logs(200)
+                    from_today = [l for l in logs if l.get("timestamp", "").startswith(date_str)]
+                    
+                    if not from_today:
+                        # Write to last_sync anyway
+                        with open("last_sync.json", "w") as sf:
+                            json.dump({"last_sync": date_str}, sf)
+                        return
+                        
+                    json_bytes = json.dumps(from_today, indent=2).encode('utf-8')
+                    f = io.BytesIO(json_bytes)
+                    f.name = f"daily_summary_{date_str}.json"
+                    
+                    text = f"📊 <b>Daily Activity Digest - {date_str}</b>\n\nThere were {len(from_today)} backup actions recorded today. Master backup JSON attached."
+                    
+                    for uname, cid in _admin_chat_ids.items():
+                        if cid:
+                            try:
+                                f.seek(0)
+                                await context.bot.send_document(chat_id=cid, document=f, caption=text, parse_mode="HTML")
+                            except Exception as e:
+                                logger.error(f"Failed to send daily digest to {uname}: {e}")
+                    
+                    try:
+                        with open("last_sync.json", "w") as sf:
+                            json.dump({"last_sync": date_str}, sf)
+                    except Exception as e:
+                        logger.error(f"Error saving last_sync: {e}")
+
+                import datetime as dt
+                target_time = dt.time(hour=23, minute=0, tzinfo=IST)
+                if application.job_queue:
+                    application.job_queue.run_daily(daily_summary_job, time=target_time)
+                
+                date_str = datetime.now(IST).strftime('%Y-%m-%d')
+                try:
+                    if os.path.exists("last_sync.json"):
+                        with open("last_sync.json", "r") as sf:
+                            last_sync = json.load(sf).get("last_sync", "")
+                    else:
+                        last_sync = ""
+                except: last_sync = ""
+                
+                if datetime.now(IST).hour >= 23 and last_sync != date_str:
+                    if application.job_queue:
+                        application.job_queue.run_once(daily_summary_job, 10)
+
             app = (
                 ApplicationBuilder()
                 .token(TELEGRAM_BOT_TOKEN)
@@ -441,6 +774,10 @@ def main():
             app.add_handler(CommandHandler("list", list_cmd))
             app.add_handler(CommandHandler("delete", delete_cmd))
             app.add_handler(CommandHandler("reset", reset_cmd))
+            app.add_handler(CommandHandler("log", log_cmd))
+            app.add_handler(CommandHandler("export", export_cmd))
+            app.add_handler(CommandHandler("verifychannel", verifychannel_cmd))
+            app.add_handler(CallbackQueryHandler(log_callback, pattern="^log_page_"))
             app.add_handler(MessageHandler(filters.ALL & (~filters.COMMAND), handle_all))
 
             print(f"🚀 Bot V5.1 is running for {len(AUTHORIZED_USERNAMES)} authorized usernames...")
