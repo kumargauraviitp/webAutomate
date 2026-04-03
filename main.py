@@ -422,15 +422,35 @@ async def log_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         with open("activity_log.json", "r", encoding="utf-8") as f:
             logs = json.load(f)
         
-        txt_content = "📊 RPS Admin Bot - Full Activity Log\n=====================================\n\n"
-        for log in logs:
-            txt_content += f"[{log.get('timestamp', '')}] {log.get('action')} by @{log.get('user')}\n"
-            txt_content += f"Details: {json.dumps(log.get('details', {}))}\n"
-            txt_content += "-"*40 + "\n"
+        # Newest at the top for better readability
+        logs.reverse()
         
-        f_bytes = io.BytesIO(txt_content.encode('utf-8'))
-        f_bytes.name = f"activity_log_full_{int(time.time())}.txt"
-        await update.message.reply_document(document=f_bytes, caption="📊 Full Activity Log")
+        msg_chunk = "📊 <b>RPS Admin Bot - Full Activity Log</b>\n=====================================\n\n"
+        for log in logs:
+            action = html.escape(log.get('action', 'Unknown Action'))
+            user = html.escape(log.get('user', 'unknown'))
+            ts = log.get('timestamp', '')[:19].replace('T', ' ')
+            
+            icon = "🔹"
+            if "Delete" in action or "Reset" in action: icon = "🗑"
+            elif "Create" in action: icon = "✅"
+            elif "Banner" in action: icon = "🚩"
+            
+            # Show a smaller, readable snippet of raw details
+            detail_val = json.dumps(log.get('details', {}))
+            if len(detail_val) > 200: detail_val = detail_val[:197] + "..."
+            detail_str = html.escape(detail_val)
+            
+            entry_text = f"{icon} <b>{action}</b> by @{user}\n   <i>{ts}</i>\n   <pre>{detail_str}</pre>\n\n"
+            
+            if len(msg_chunk) + len(entry_text) > 3800:
+                await update.message.reply_text(msg_chunk, parse_mode="HTML")
+                msg_chunk = ""
+                
+            msg_chunk += entry_text
+            
+        if msg_chunk:
+            await update.message.reply_text(msg_chunk, parse_mode="HTML")
         return
 
     # Send first page
